@@ -1,18 +1,18 @@
 import re
-from datetime import date
+from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
 
 
 st.set_page_config(
-    page_title="Lark 特殊订单库存扣减",
+    page_title="NailVesta 水单库存扣减工具",
     page_icon="💅",
     layout="wide",
 )
 
-st.title("💅 Lark 特殊订单库存扣减")
-st.caption("上传库存表 + 各水单 CSV，选择日期后，程序按【款式名称 + 尺码】汇总扣减库存。")
+st.title("💅 NailVesta 水单库存扣减工具")
+st.caption("上传库存表 + 各水单 CSV，选择一个或多个日期后，程序按【款式名称 + 尺码】汇总扣减库存。")
 
 
 # =========================
@@ -75,7 +75,7 @@ def size_from_sku(sku):
 
 def find_col(df, candidates, contains_any=None):
     """先精确匹配列名，再模糊包含匹配。"""
-    if df is None or df.empty and len(df.columns) == 0:
+    if df is None or (df.empty and len(df.columns) == 0):
         return None
 
     cols = list(df.columns)
@@ -112,7 +112,48 @@ def first_existing_col(df, candidates):
 
 
 def parse_date_series(series):
+    # 兼容 Lark/Excel 导出的 2026/05/06、2026-05-06、带时间戳等格式。
     return pd.to_datetime(series.astype(str).str.strip(), errors="coerce").dt.date
+
+
+def format_date_distribution(parsed_dates):
+    valid = parsed_dates.dropna()
+    if valid.empty:
+        return "没有可识别日期"
+    counts = valid.value_counts().sort_index()
+    return "；".join([f"{d.strftime('%Y/%m/%d')}：{int(n)}条" for d, n in counts.items()])
+
+
+def get_date_distribution_row(df_raw, table_name):
+    df = clean_dataframe(df_raw)
+    if df is None or (df.empty and len(df.columns) == 0):
+        return {"来源表": table_name, "总行数": 0, "日期列": "未找到", "可识别日期分布": "空表"}
+
+    date_col = find_col(df, ["日期", "Date", "date"])
+    if not date_col:
+        return {"来源表": table_name, "总行数": len(df), "日期列": "未找到", "可识别日期分布": "无法检查"}
+
+    parsed = parse_date_series(df[date_col]) if len(df) else pd.Series([], dtype=object)
+    return {
+        "来源表": table_name,
+        "总行数": len(df),
+        "日期列": date_col,
+        "可识别日期分布": format_date_distribution(parsed),
+    }
+
+
+def get_available_dates_from_one_file(uploaded_file):
+    if uploaded_file is None:
+        return []
+    df_raw = read_csv_safely(uploaded_file)
+    df = clean_dataframe(df_raw)
+    if df is None or (df.empty and len(df.columns) == 0):
+        return []
+    date_col = find_col(df, ["日期", "Date", "date"])
+    if not date_col:
+        return []
+    parsed = parse_date_series(df[date_col]).dropna()
+    return sorted(set(parsed.tolist()))
 
 
 def date_col_name(selected_date):
@@ -120,12 +161,27 @@ def date_col_name(selected_date):
     return selected_date.strftime("%m/%d")
 
 
+def format_dates_label(selected_dates):
+    if not selected_dates:
+        return "未选择"
+    return "、".join([d.strftime("%Y/%m/%d") for d in selected_dates])
+
+
+def file_date_label(selected_dates):
+    if not selected_dates:
+        return datetime.now().strftime("%Y%m%d_%H%M")
+    dates = sorted(selected_dates)
+    if len(dates) == 1:
+        return dates[0].strftime("%Y%m%d")
+    return f"{dates[0].strftime('%Y%m%d')}-{dates[-1].strftime('%Y%m%d')}_{len(dates)}dates"
+
+
 def to_csv_bytes(df):
     return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
 
 # =========================
-# 款式拆分：重点修正版
+# 款式拆分
 # =========================
 
 def split_style_names(raw_value):
@@ -240,21 +296,31 @@ def prepare_inventory(inv_raw):
 # 来源表提取
 # =========================
 
-def extract_rows_from_one_table(df_raw, table_name, selected_date, style_cols_priority, size_cols_priority, done_only):
+def extract_rows_from_one_table(df_raw, table_name, selected_dates, style_cols_priority, size_cols_priority, done_only):
     df = clean_dataframe(df_raw)
     if df is None or (df.empty and len(df.columns) == 0):
         return pd.DataFrame(), [f"{table_name}：空表，已跳过。"]
 
+    if df.empty:
+        return pd.DataFrame(), [f"{table_name}：CSV 只有表头，0 条记录，已跳过。"]
+
     date_col = find_col(df, ["日期", "Date", "date"])
     if not date_col:
-        return pd.DataFrame(), [f"{table_name}：没有找到日期列，已跳过。"]
+        return pd.DataFrame(), [f"{table_name}：没有找到日期列，已跳过。当前列名：{', '.join(df.columns)}"]
+
+    selected_dates = sorted(set(selected_dates))
+    selected_dates_set = set(selected_dates)
+    selected_label = format_dates_label(selected_dates)
 
     tmp = df.copy()
     tmp["__parsed_date"] = parse_date_series(tmp[date_col])
-    tmp = tmp[tmp["__parsed_date"] == selected_date].copy()
+    date_distribution = format_date_distribution(tmp["__parsed_date"])
+    tmp = tmp[tmp["__parsed_date"].isin(selected_dates_set)].copy()
 
     if tmp.empty:
-        return pd.DataFrame(), [f"{table_name}：所选日期没有记录。"]
+        return pd.DataFrame(), [
+            f"{table_name}：所选日期 {selected_label} 没有记录。这个 CSV 里可识别日期是：{date_distribution}。"
+        ]
 
     tmp = optional_done_filter(tmp, done_only)
     if tmp.empty:
@@ -275,6 +341,7 @@ def extract_rows_from_one_table(df_raw, table_name, selected_date, style_cols_pr
         raw_size = row.get(size_col, "")
         styles = split_style_names(raw_style)
         size = norm_size(raw_size)
+        row_date = row.get("__parsed_date")
 
         if not styles or not size:
             warnings.append(f"{table_name}：第 {int(idx) + 2} 行款式或尺码为空，已跳过。")
@@ -282,17 +349,20 @@ def extract_rows_from_one_table(df_raw, table_name, selected_date, style_cols_pr
 
         for style in styles:
             rows.append({
+                "日期": row_date,
                 "款式名称": style,
                 "尺码": size,
                 "扣减数量": 1,
+                "来源表": table_name,
             })
 
     return pd.DataFrame(rows), warnings
 
 
-def build_deduction_summary(uploaded_sources, selected_date, done_only):
+def build_deduction_summary(uploaded_sources, selected_dates, done_only):
     all_rows = []
     all_warnings = []
+    date_check_rows = []
 
     for source in uploaded_sources:
         table_name = source["name"]
@@ -301,10 +371,11 @@ def build_deduction_summary(uploaded_sources, selected_date, done_only):
             continue
 
         df_raw = read_csv_safely(uploaded)
+        date_check_rows.append(get_date_distribution_row(df_raw, table_name))
         rows, warnings = extract_rows_from_one_table(
             df_raw=df_raw,
             table_name=table_name,
-            selected_date=selected_date,
+            selected_dates=selected_dates,
             style_cols_priority=source["style_cols"],
             size_cols_priority=source["size_cols"],
             done_only=done_only,
@@ -313,8 +384,12 @@ def build_deduction_summary(uploaded_sources, selected_date, done_only):
             all_rows.append(rows)
         all_warnings.extend(warnings)
 
+    date_check = pd.DataFrame(date_check_rows, columns=["来源表", "总行数", "日期列", "可识别日期分布"])
+
+    empty_summary_cols = ["__norm_style", "__norm_size", "款式名称", "尺码", "本次扣减数量"]
+    empty_detail_cols = ["日期", "款式名称", "尺码", "扣减数量", "来源表", "__norm_style", "__norm_size"]
     if not all_rows:
-        return pd.DataFrame(columns=["款式名称", "尺码", "本次扣减数量"]), all_warnings
+        return pd.DataFrame(columns=empty_summary_cols), all_warnings, date_check, pd.DataFrame(columns=empty_detail_cols)
 
     detail = pd.concat(all_rows, ignore_index=True)
     detail["__norm_style"] = detail["款式名称"].map(norm_style)
@@ -330,7 +405,8 @@ def build_deduction_summary(uploaded_sources, selected_date, done_only):
         .sort_values(["款式名称", "尺码"])
         .reset_index(drop=True)
     )
-    return summary, all_warnings
+    summary["本次扣减数量"] = summary["本次扣减数量"].astype(int)
+    return summary, all_warnings, date_check, detail
 
 
 # =========================
@@ -347,12 +423,37 @@ with st.sidebar:
     influencer_file = st.file_uploader("深达水单表 CSV", type=["csv"])
     exchange_file = st.file_uploader("达人换货表 CSV", type=["csv"])
 
+    available_dates = sorted(set(
+        get_available_dates_from_one_file(b4g1_file)
+        + get_available_dates_from_one_file(normal_file)
+        + get_available_dates_from_one_file(influencer_file)
+        + get_available_dates_from_one_file(exchange_file)
+    ))
+
     st.header("2）选择日期")
-    selected_date = st.date_input("只扣减这个日期的记录", value=date.today())
+    if available_dates:
+        default_dates = [date.today()] if date.today() in available_dates else [available_dates[-1]]
+        selected_dates = st.multiselect(
+            "选择要扣减的日期（可多选）",
+            options=available_dates,
+            default=default_dates,
+            format_func=lambda d: d.strftime("%Y/%m/%d"),
+        )
+        st.caption("周一补扣时，可以同时选周五、周六、周一。程序会合并扣减。")
+    else:
+        one_date = st.date_input("选择要扣减的日期", value=date.today())
+        selected_dates = [one_date]
+        st.caption("上传水单 CSV 后，这里会自动变成可多选日期列表。")
+
     done_only = st.checkbox("只扣已打包 / 已完成发货记录", value=False)
     update_date_snapshot = st.checkbox("同时新增 / 更新所选日期库存列", value=True)
     floor_zero = st.checkbox("扣减后库存不低于 0", value=False)
 
+selected_dates = sorted(set(selected_dates))
+
+if not selected_dates:
+    st.warning("请至少选择一个要扣减的日期。")
+    st.stop()
 
 if inventory_file is None:
     st.warning("请先在左侧上传库存表 CSV。")
@@ -412,12 +513,17 @@ sources = [
     },
 ]
 
-summary, warnings = build_deduction_summary(sources, selected_date, done_only)
+summary, warnings, date_check, detail = build_deduction_summary(sources, selected_dates, done_only)
+
+st.info(f"本次选择扣减日期：{format_dates_label(selected_dates)}")
 
 if summary.empty:
     st.warning("所选日期没有可扣减记录。")
+    if not date_check.empty:
+        st.subheader("上传文件日期检查")
+        st.dataframe(date_check, use_container_width=True, hide_index=True)
     if warnings:
-        with st.expander("查看提示"):
+        with st.expander("查看提示", expanded=True):
             for w in warnings:
                 st.write("-", w)
     st.stop()
@@ -434,24 +540,42 @@ work["__stock_before"] = pd.to_numeric(
     errors="coerce",
 ).fillna(0)
 
+# 用总扣减数量计算最终库存。
 summary_for_merge = summary[["__norm_style", "__norm_size", "本次扣减数量"]].copy()
 work = work.merge(summary_for_merge, on=["__norm_style", "__norm_size"], how="left")
 work["本次扣减数量"] = work["本次扣减数量"].fillna(0).astype(int)
-work["__stock_after"] = work["__stock_before"] - work["本次扣减数量"]
-negative_mask = work["__stock_after"] < 0
+work["__stock_after_raw"] = work["__stock_before"] - work["本次扣减数量"]
+negative_mask = work["__stock_after_raw"] < 0
 
-if floor_zero:
-    work["__stock_after"] = work["__stock_after"].clip(lower=0)
+# 如勾选日期库存列，则按日期顺序逐日扣减并写入 05/xx 列。
+work["__running_stock"] = work["__stock_before"].copy()
+if update_date_snapshot:
+    daily_summary = (
+        detail.groupby(["日期", "__norm_style", "__norm_size"], as_index=False)
+        .agg(当日扣减数量=("扣减数量", "sum"))
+    )
+
+    for d in selected_dates:
+        one_day = daily_summary[daily_summary["日期"] == d][["__norm_style", "__norm_size", "当日扣减数量"]].copy()
+        tmp_qty = work[["__norm_style", "__norm_size"]].merge(
+            one_day,
+            on=["__norm_style", "__norm_size"],
+            how="left",
+        )["当日扣减数量"].fillna(0).astype(int)
+        work["__running_stock"] = work["__running_stock"] - tmp_qty.values
+        if floor_zero:
+            work["__running_stock"] = work["__running_stock"].clip(lower=0)
+        result[date_col_name(d)] = work["__running_stock"].round(0).astype(int)
+else:
+    work["__running_stock"] = work["__stock_after_raw"]
+    if floor_zero:
+        work["__running_stock"] = work["__running_stock"].clip(lower=0)
 
 # 只把最终库存写回原始表，不添加任何诊断列。
-result[stock_col] = work["__stock_after"].round(0).astype(int)
+result[stock_col] = work["__running_stock"].round(0).astype(int)
 
-if update_date_snapshot:
-    day_col = date_col_name(selected_date)
-    result[day_col] = work["__stock_after"].round(0).astype(int)
-
-matched_keys = set(zip(work.loc[work["本次扣减数量"] > 0, "__norm_style"], work.loc[work["本次扣减数量"] > 0, "__norm_size"]))
-summary["__matched"] = summary.apply(lambda r: (r["__norm_style"], r["__norm_size"]) in matched_keys, axis=1)
+available_keys = set(zip(work["__norm_style"], work["__norm_size"]))
+summary["__matched"] = summary.apply(lambda r: (r["__norm_style"], r["__norm_size"]) in available_keys, axis=1)
 matched_summary = summary[summary["__matched"]].copy()
 unmatched_summary = summary[~summary["__matched"]].copy()
 
@@ -463,7 +587,7 @@ all_summary_clean = summary[["款式名称", "尺码", "本次扣减数量"]].so
 # =========================
 
 st.subheader("1）本次扣减汇总")
-st.caption("一个 cell 里有多个款式时，程序会拆成多个款式分别扣减；同一行的尺码会应用到该行所有款式。")
+st.caption("一个 cell 里有多个款式时，程序会拆成多个款式分别扣减；同一行的尺码会应用到该行所有款式。多选日期时，下面数量是所选日期合并后的总扣减数量。")
 
 m1, m2, m3 = st.columns(3)
 with m1:
@@ -473,7 +597,12 @@ with m2:
 with m3:
     st.metric("未匹配项", len(unmatched_summary))
 
-st.dataframe(show_summary, use_container_width=True, hide_index=True)
+if not show_summary.empty:
+    show_summary = show_summary.copy()
+    show_summary["本次扣减数量"] = show_summary["本次扣减数量"].astype(int)
+    st.table(show_summary)
+else:
+    st.info("没有成功匹配到库存表的扣减项。")
 
 if not unmatched_summary.empty:
     st.error("以下款式 + 尺码没有在库存表中匹配到，所以没有扣减。请检查水单款式名 / 尺码是否和库存表一致。")
@@ -484,18 +613,24 @@ if not unmatched_summary.empty:
     )
 
 if negative_mask.any():
-    negative_rows = work.loc[negative_mask, ["__match_style", "__match_size", "__stock_before", "本次扣减数量", "__stock_after"]].copy()
+    negative_rows = work.loc[negative_mask, ["__match_style", "__match_size", "__stock_before", "本次扣减数量", "__stock_after_raw"]].copy()
     negative_rows.columns = ["款式名称", "尺码", "扣减前库存", "本次扣减数量", "扣减后库存"]
     st.warning("有库存扣减后小于 0，请重点核对。")
     st.dataframe(negative_rows, use_container_width=True, hide_index=True)
 
+with st.expander("上传文件日期检查"):
+    if not date_check.empty:
+        st.dataframe(date_check, use_container_width=True, hide_index=True)
+    else:
+        st.write("没有上传任何水单来源表。")
+
 if warnings:
-    with st.expander("查看跳过 / 识别提示"):
+    with st.expander("查看跳过 / 识别提示", expanded=False):
         for w in warnings:
             st.write("-", w)
 
 st.subheader("2）扣完库存后的最新全部库存")
-st.caption("这里保留库存表原本的格式；只更新【当前库存】，并按需新增 / 更新所选日期库存列。")
+st.caption("这里保留库存表原本的格式；只更新【当前库存】。如果勾选日期库存列，多选日期会按日期顺序逐日新增 / 更新 05/xx 库存列。")
 st.dataframe(result, use_container_width=True, hide_index=True)
 
 st.subheader("下载结果")
@@ -504,13 +639,13 @@ with col1:
     st.download_button(
         "下载：扣完库存后的最新库存 CSV",
         data=to_csv_bytes(result),
-        file_name=f"NailVesta_库存扣减后_{selected_date.strftime('%Y%m%d')}.csv",
+        file_name=f"NailVesta_库存扣减后_{file_date_label(selected_dates)}.csv",
         mime="text/csv",
     )
 with col2:
     st.download_button(
         "下载：本次扣减汇总 CSV",
         data=to_csv_bytes(all_summary_clean),
-        file_name=f"NailVesta_本次扣减汇总_{selected_date.strftime('%Y%m%d')}.csv",
+        file_name=f"NailVesta_本次扣减汇总_{file_date_label(selected_dates)}.csv",
         mime="text/csv",
     )
