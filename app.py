@@ -11,7 +11,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("💅 NailVesta 每日水单库存扣减工具")
+st.title("💅 Lark 特殊订单库存扣减")
 st.caption("上传库存表 + 各水单 CSV，选择日期后，程序按【款式名称 + 尺码】汇总扣减库存。")
 
 
