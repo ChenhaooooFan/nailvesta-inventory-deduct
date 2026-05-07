@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("💅 NailVesta 水单库存扣减工具")
-st.caption("上传库存表 + 各水单 CSV，选择一个或多个日期后，程序按【款式名称 + 尺码】汇总扣减库存。")
+st.caption("上传库存表 + 各水单总表 CSV，手动选择扣减日期区间后，程序按【款式名称 + 尺码】汇总扣减库存。")
 
 
 # =========================
@@ -430,29 +430,50 @@ with st.sidebar:
         + get_available_dates_from_one_file(exchange_file)
     ))
 
-    st.header("2）选择日期")
+    st.header("2）选择日期区间")
+    st.caption("以后上传的是完整总表也没问题：这里只按你手动选择的日期区间扣减，区间首尾日期都包含。")
+
+    # 上传的是完整总表时，默认不能选“最早日期到最新日期”，否则容易误扣很多天。
+    # 所以默认只选 CSV 里能识别到的最新一天；你需要补扣周五-周一时，再手动拉开区间。
     if available_dates:
-        default_dates = [date.today()] if date.today() in available_dates else [available_dates[-1]]
-        selected_dates = st.multiselect(
-            "选择要扣减的日期（可多选）",
-            options=available_dates,
-            default=default_dates,
-            format_func=lambda d: d.strftime("%Y/%m/%d"),
-        )
-        st.caption("周一补扣时，可以同时选周五、周六、周一。程序会合并扣减。")
+        max_available_date = max(available_dates)
+        default_start = max_available_date
+        default_end = max_available_date
     else:
-        one_date = st.date_input("选择要扣减的日期", value=date.today())
-        selected_dates = [one_date]
-        st.caption("上传水单 CSV 后，这里会自动变成可多选日期列表。")
+        default_start = date.today()
+        default_end = date.today()
+
+    date_range = st.date_input(
+        "选择扣减日期区间",
+        value=(default_start, default_end),
+        help="例如周一补扣时，开始日期选上周五，结束日期选本周一。程序会扣这个区间内所有记录。",
+    )
+
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        range_start, range_end = date_range
+    else:
+        range_start = date_range
+        range_end = date_range
+
+    if range_start > range_end:
+        range_start, range_end = range_end, range_start
+
+    selected_dates = [d.date() for d in pd.date_range(range_start, range_end, freq="D")]
+
+    st.caption(f"本次将扣减：{range_start.strftime('%Y/%m/%d')} 至 {range_end.strftime('%Y/%m/%d')}，共 {len(selected_dates)} 天。")
+    if available_dates:
+        st.caption("上传 CSV 实际包含日期：" + "、".join([d.strftime("%Y/%m/%d") for d in available_dates]))
+    else:
+        st.caption("还没有从上传的水单 CSV 里识别到日期。")
 
     done_only = st.checkbox("只扣已打包 / 已完成发货记录", value=False)
-    update_date_snapshot = st.checkbox("同时新增 / 更新所选日期库存列", value=True)
+    update_date_snapshot = st.checkbox("同时新增 / 更新日期库存列", value=True)
     floor_zero = st.checkbox("扣减后库存不低于 0", value=False)
 
 selected_dates = sorted(set(selected_dates))
 
 if not selected_dates:
-    st.warning("请至少选择一个要扣减的日期。")
+    st.warning("请选择要扣减的日期区间。")
     st.stop()
 
 if inventory_file is None:
@@ -587,7 +608,7 @@ all_summary_clean = summary[["款式名称", "尺码", "本次扣减数量"]].so
 # =========================
 
 st.subheader("1）本次扣减汇总")
-st.caption("一个 cell 里有多个款式时，程序会拆成多个款式分别扣减；同一行的尺码会应用到该行所有款式。多选日期时，下面数量是所选日期合并后的总扣减数量。")
+st.caption("一个 cell 里有多个款式时，程序会拆成多个款式分别扣减；同一行的尺码会应用到该行所有款式。下面数量是所选日期区间合并后的总扣减数量。")
 
 m1, m2, m3 = st.columns(3)
 with m1:
@@ -630,7 +651,7 @@ if warnings:
             st.write("-", w)
 
 st.subheader("2）扣完库存后的最新全部库存")
-st.caption("这里保留库存表原本的格式；只更新【当前库存】。如果勾选日期库存列，多选日期会按日期顺序逐日新增 / 更新 05/xx 库存列。")
+st.caption("这里保留库存表原本的格式；只更新【当前库存】。如果勾选日期库存列，程序会按日期区间顺序逐日新增 / 更新 05/xx 库存列。")
 st.dataframe(result, use_container_width=True, hide_index=True)
 
 st.subheader("下载结果")
