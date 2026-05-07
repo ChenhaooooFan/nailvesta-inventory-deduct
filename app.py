@@ -6,12 +6,12 @@ import streamlit as st
 
 
 st.set_page_config(
-    page_title="NailVesta 水单库存扣减工具",
+    page_title="Lark 特殊订单库存扣减",
     page_icon="💅",
     layout="wide",
 )
 
-st.title("💅 NailVesta 水单库存扣减工具")
+st.title("💅 Lark 特殊订单库存扣减")
 st.caption("上传库存表 + 各水单总表 CSV，手动选择扣减日期区间后，程序按【款式名称 + 尺码】汇总扣减库存。")
 
 
