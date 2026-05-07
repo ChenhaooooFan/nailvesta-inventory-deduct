@@ -6,7 +6,7 @@ import streamlit as st
 
 
 st.set_page_config(
-    page_title="NailVesta 每日水单库存扣减工具",
+    page_title="Lark 特殊订单库存扣减",
     page_icon="💅",
     layout="wide",
 )
