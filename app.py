@@ -342,7 +342,7 @@ with st.sidebar:
     inventory_file = st.file_uploader("库存表 CSV（必传）", type=["csv"])
 
     st.divider()
-    b4g1_file = st.file_uploader("水单补寄表 / B4G1_B4 表 CSV", type=["csv"])
+    b4g1_file = st.file_uploader("赠送款式 / B4 表 CSV", type=["csv"])
     normal_file = st.file_uploader("水单表 - 新普通水单 CSV", type=["csv"])
     influencer_file = st.file_uploader("深达水单表 CSV", type=["csv"])
     exchange_file = st.file_uploader("达人换货表 CSV", type=["csv"])
@@ -387,13 +387,13 @@ if dup_mask.any():
 
 sources = [
     {
-        "name": "赠送款式表/B4G1",
+        "name": "赠送款式/B4表",
         "file": b4g1_file,
         "style_cols": ["赠送款式 Style Names", "Product Name", "款式", "款式名称", "Style Names", "款式 + 库位"],
         "size_cols": ["尺码 (size)", "Size'", "Size", "尺码"],
     },
     {
-        "name": "新普通水单",
+        "name": "水单表-新普通水单",
         "file": normal_file,
         "style_cols": ["Product Name", "款式", "款式名称", "Style Names", "赠送款式 Style Names", "款式 + 库位"],
         "size_cols": ["Size'", "Size", "尺码", "尺码 (size)"],
