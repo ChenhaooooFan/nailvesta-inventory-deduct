@@ -387,13 +387,13 @@ if dup_mask.any():
 
 sources = [
     {
-        "name": "水单补寄表/B4G1_B4",
+        "name": "赠送款式表/B4G1",
         "file": b4g1_file,
         "style_cols": ["赠送款式 Style Names", "Product Name", "款式", "款式名称", "Style Names", "款式 + 库位"],
         "size_cols": ["尺码 (size)", "Size'", "Size", "尺码"],
     },
     {
-        "name": "水单表-新普通水单",
+        "name": "新普通水单",
         "file": normal_file,
         "style_cols": ["Product Name", "款式", "款式名称", "Style Names", "赠送款式 Style Names", "款式 + 库位"],
         "size_cols": ["Size'", "Size", "尺码", "尺码 (size)"],
