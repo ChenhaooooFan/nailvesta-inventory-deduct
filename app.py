@@ -12,7 +12,7 @@ st.set_page_config(
 )
 
 st.title("💅 Lark 特殊订单库存扣减")
-st.caption("上传库存表 + 各水单总表 CSV，手动选择扣减日期区间后，程序按【款式名称 + 尺码】汇总扣减库存。")
+st.caption("上传库存表 + 各水单总表 CSV，手动选择日期区间后，程序按【款式名称 + 尺码】汇总库存变动。普通出库 / 换货发货 = -1，达人换货原款式 = +1。")
 
 
 # =========================
@@ -51,6 +51,12 @@ def norm_text(value):
     text = str(value).replace("\ufeff", "").replace("\u200b", "").replace("\xa0", " ").strip()
     text = re.sub(r"\s+", " ", text)
     return text
+
+
+def is_blankish(value):
+    """把 Lark 里常见的空值 / 占位符都当成空。"""
+    text = norm_text(value).strip().lower()
+    return text in ["", "-", "—", "–", "nan", "none", "null", "n/a", "na"]
 
 
 def norm_style(value):
@@ -191,10 +197,10 @@ def split_style_names(raw_value):
     - Starlit Rift, Ruby Bloom
     - Cherry Romance ｜ 库位：B-04-11,Aqua Blush ｜ 库位：A-02-07
 
-    一个 cell 里有几个款式，就每个款式各扣 1 件，尺码使用该行的尺码。
+    一个 cell 里有几个款式，就每个款式各记录 1 件；尺码使用该行的尺码。
     """
     text = norm_text(raw_value)
-    if not text:
+    if is_blankish(text):
         return []
 
     # 如果是“款式 + 库位”字段，优先抓每段“｜ 库位”前面的款式名。
@@ -203,11 +209,11 @@ def split_style_names(raw_value):
         styles = []
         for piece in pieces:
             piece = norm_text(piece)
-            if not piece:
+            if is_blankish(piece):
                 continue
             piece = re.split(r"\s*[|｜]\s*库位", piece, maxsplit=1)[0]
             piece = norm_text(piece)
-            if piece:
+            if not is_blankish(piece):
                 styles.append(piece)
         return styles
 
@@ -216,15 +222,14 @@ def split_style_names(raw_value):
     cleaned = []
     for piece in pieces:
         piece = norm_text(piece)
-        if not piece:
+        if is_blankish(piece):
             continue
         # 兜底：如果普通列里混进了“款式 ｜ 库位：xxx”，去掉库位部分。
         piece = re.split(r"\s*[|｜]\s*库位", piece, maxsplit=1)[0]
         piece = norm_text(piece)
-        if piece:
+        if not is_blankish(piece):
             cleaned.append(piece)
     return cleaned
-
 
 def truthy_series(series):
     text = series.astype(str).str.strip().str.lower()
@@ -296,7 +301,22 @@ def prepare_inventory(inv_raw):
 # 来源表提取
 # =========================
 
-def extract_rows_from_one_table(df_raw, table_name, selected_dates, style_cols_priority, size_cols_priority, done_only):
+def extract_rows_from_one_table(
+    df_raw,
+    table_name,
+    selected_dates,
+    style_cols_priority,
+    size_cols_priority,
+    done_only,
+    movement_qty=-1,
+    movement_type="出库扣减 -1",
+    skip_blank_rows_silently=False,
+):
+    """
+    movement_qty 采用库存变动方向：
+    - 普通出库 / 换货发货：-1
+    - 达人换货原款式退回库存：+1
+    """
     df = clean_dataframe(df_raw)
     if df is None or (df.empty and len(df.columns) == 0):
         return pd.DataFrame(), [f"{table_name}：空表，已跳过。"]
@@ -331,7 +351,7 @@ def extract_rows_from_one_table(df_raw, table_name, selected_dates, style_cols_p
 
     if not style_col or not size_col:
         return pd.DataFrame(), [
-            f"{table_name}：没有识别到款式列或尺码列，已跳过。当前列名：{', '.join(tmp.columns)}"
+            f"{table_name}（{movement_type}）：没有识别到款式列或尺码列，已跳过。当前列名：{', '.join(tmp.columns)}"
         ]
 
     rows = []
@@ -339,12 +359,17 @@ def extract_rows_from_one_table(df_raw, table_name, selected_dates, style_cols_p
     for idx, row in tmp.iterrows():
         raw_style = row.get(style_col, "")
         raw_size = row.get(size_col, "")
+
+        # 达人换货表里的历史记录可能没有原款式 / 原尺码；这类空行不需要反复报警。
+        if skip_blank_rows_silently and is_blankish(raw_style) and is_blankish(raw_size):
+            continue
+
         styles = split_style_names(raw_style)
         size = norm_size(raw_size)
         row_date = row.get("__parsed_date")
 
-        if not styles or not size:
-            warnings.append(f"{table_name}：第 {int(idx) + 2} 行款式或尺码为空，已跳过。")
+        if not styles or is_blankish(size):
+            warnings.append(f"{table_name}（{movement_type}）：第 {int(idx) + 2} 行款式或尺码为空，已跳过。")
             continue
 
         for style in styles:
@@ -352,7 +377,8 @@ def extract_rows_from_one_table(df_raw, table_name, selected_dates, style_cols_p
                 "日期": row_date,
                 "款式名称": style,
                 "尺码": size,
-                "扣减数量": 1,
+                "库存变动数量": int(movement_qty),
+                "变动类型": movement_type,
                 "来源表": table_name,
             })
 
@@ -372,22 +398,29 @@ def build_deduction_summary(uploaded_sources, selected_dates, done_only):
 
         df_raw = read_csv_safely(uploaded)
         date_check_rows.append(get_date_distribution_row(df_raw, table_name))
-        rows, warnings = extract_rows_from_one_table(
-            df_raw=df_raw,
-            table_name=table_name,
-            selected_dates=selected_dates,
-            style_cols_priority=source["style_cols"],
-            size_cols_priority=source["size_cols"],
-            done_only=done_only,
-        )
-        if not rows.empty:
-            all_rows.append(rows)
-        all_warnings.extend(warnings)
+
+        # 普通表只有 1 个 movement；达人换货表有 2 个 movement：发货 -1、原款 +1。
+        movements = source.get("movements") or [source]
+        for movement in movements:
+            rows, warnings = extract_rows_from_one_table(
+                df_raw=df_raw,
+                table_name=table_name,
+                selected_dates=selected_dates,
+                style_cols_priority=movement["style_cols"],
+                size_cols_priority=movement["size_cols"],
+                done_only=done_only,
+                movement_qty=movement.get("movement_qty", -1),
+                movement_type=movement.get("movement_type", "出库扣减 -1"),
+                skip_blank_rows_silently=movement.get("skip_blank_rows_silently", False),
+            )
+            if not rows.empty:
+                all_rows.append(rows)
+            all_warnings.extend(warnings)
 
     date_check = pd.DataFrame(date_check_rows, columns=["来源表", "总行数", "日期列", "可识别日期分布"])
 
-    empty_summary_cols = ["__norm_style", "__norm_size", "款式名称", "尺码", "本次扣减数量"]
-    empty_detail_cols = ["日期", "款式名称", "尺码", "扣减数量", "来源表", "__norm_style", "__norm_size"]
+    empty_summary_cols = ["__norm_style", "__norm_size", "款式名称", "尺码", "本次库存变动数量"]
+    empty_detail_cols = ["日期", "款式名称", "尺码", "库存变动数量", "变动类型", "来源表", "__norm_style", "__norm_size"]
     if not all_rows:
         return pd.DataFrame(columns=empty_summary_cols), all_warnings, date_check, pd.DataFrame(columns=empty_detail_cols)
 
@@ -400,14 +433,13 @@ def build_deduction_summary(uploaded_sources, selected_dates, done_only):
         .agg(
             款式名称=("款式名称", "first"),
             尺码=("尺码", "first"),
-            本次扣减数量=("扣减数量", "sum"),
+            本次库存变动数量=("库存变动数量", "sum"),
         )
         .sort_values(["款式名称", "尺码"])
         .reset_index(drop=True)
     )
-    summary["本次扣减数量"] = summary["本次扣减数量"].astype(int)
+    summary["本次库存变动数量"] = summary["本次库存变动数量"].astype(int)
     return summary, all_warnings, date_check, detail
-
 
 # =========================
 # 页面：上传和设置
@@ -431,7 +463,7 @@ with st.sidebar:
     ))
 
     st.header("2）选择日期区间")
-    st.caption("以后上传的是完整总表也没问题：这里只按你手动选择的日期区间扣减，区间首尾日期都包含。")
+    st.caption("以后上传的是完整总表也没问题：这里只按你手动选择的日期区间做库存变动，区间首尾日期都包含。")
 
     # 上传的是完整总表时，默认不能选“最早日期到最新日期”，否则容易误扣很多天。
     # 所以默认只选 CSV 里能识别到的最新一天；你需要补扣周五-周一时，再手动拉开区间。
@@ -444,9 +476,9 @@ with st.sidebar:
         default_end = date.today()
 
     date_range = st.date_input(
-        "选择扣减日期区间",
+        "选择库存变动日期区间",
         value=(default_start, default_end),
-        help="例如周一补扣时，开始日期选上周五，结束日期选本周一。程序会扣这个区间内所有记录。",
+        help="例如周一补处理时，开始日期选上周五，结束日期选本周一。程序会处理这个区间内所有记录。",
     )
 
     if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -460,15 +492,15 @@ with st.sidebar:
 
     selected_dates = [d.date() for d in pd.date_range(range_start, range_end, freq="D")]
 
-    st.caption(f"本次将扣减：{range_start.strftime('%Y/%m/%d')} 至 {range_end.strftime('%Y/%m/%d')}，共 {len(selected_dates)} 天。")
+    st.caption(f"本次将处理：{range_start.strftime('%Y/%m/%d')} 至 {range_end.strftime('%Y/%m/%d')}，共 {len(selected_dates)} 天。")
     if available_dates:
         st.caption("上传 CSV 实际包含日期：" + "、".join([d.strftime("%Y/%m/%d") for d in available_dates]))
     else:
         st.caption("还没有从上传的水单 CSV 里识别到日期。")
 
-    done_only = st.checkbox("只扣已打包 / 已完成发货记录", value=False)
+    done_only = st.checkbox("只处理已打包 / 已完成发货记录", value=False)
     update_date_snapshot = st.checkbox("同时新增 / 更新日期库存列", value=True)
-    floor_zero = st.checkbox("扣减后库存不低于 0", value=False)
+    floor_zero = st.checkbox("库存变动后库存不低于 0", value=False)
 
 selected_dates = sorted(set(selected_dates))
 
@@ -513,33 +545,54 @@ sources = [
         "file": b4g1_file,
         "style_cols": ["赠送款式 Style Names", "Product Name", "款式", "款式名称", "Style Names", "款式 + 库位"],
         "size_cols": ["尺码 (size)", "Size'", "Size", "尺码"],
+        "movement_qty": -1,
+        "movement_type": "赠送/B4出库 -1",
     },
     {
         "name": "水单表-新普通水单",
         "file": normal_file,
         "style_cols": ["Product Name", "款式", "款式名称", "Style Names", "赠送款式 Style Names", "款式 + 库位"],
         "size_cols": ["Size'", "Size", "尺码", "尺码 (size)"],
+        "movement_qty": -1,
+        "movement_type": "普通水单出库 -1",
     },
     {
         "name": "深达水单表",
         "file": influencer_file,
         "style_cols": ["Product Name", "Product Name1", "款式", "款式名称", "Style Names", "款式 + 库位"],
         "size_cols": ["Size'", "Size", "尺码", "尺码 (size)"],
+        "movement_qty": -1,
+        "movement_type": "深达水单出库 -1",
     },
     {
         "name": "达人换货表",
         "file": exchange_file,
-        "style_cols": ["发货款式", "Product Name", "款式", "款式名称"],
-        "size_cols": ["发货尺码", "Size'", "Size", "尺码", "尺码 (size)"],
+        "movements": [
+            {
+                # 换货新发出去的款式，库存 -1。
+                "style_cols": ["发货款式", "Product Name", "款式", "款式名称"],
+                "size_cols": ["发货尺码", "Size'", "Size", "尺码", "尺码 (size)"],
+                "movement_qty": -1,
+                "movement_type": "换货发货款式 -1",
+            },
+            {
+                # 顾客原本收到 / 要换掉的原款式，回到可用库存，库存 +1。
+                "style_cols": ["原款式名称", "原款式", "原款款式", "Original Style", "Original Product Name"],
+                "size_cols": ["原款式尺码", "原款尺码", "Original Size", "Original Variant Size"],
+                "movement_qty": 1,
+                "movement_type": "换货原款式加回 +1",
+                "skip_blank_rows_silently": True,
+            },
+        ],
     },
 ]
 
 summary, warnings, date_check, detail = build_deduction_summary(sources, selected_dates, done_only)
 
-st.info(f"本次选择扣减日期：{format_dates_label(selected_dates)}")
+st.info(f"本次选择库存变动日期：{format_dates_label(selected_dates)}")
 
 if summary.empty:
-    st.warning("所选日期没有可扣减记录。")
+    st.warning("所选日期没有可处理的库存变动记录。")
     if not date_check.empty:
         st.subheader("上传文件日期检查")
         st.dataframe(date_check, use_container_width=True, hide_index=True)
@@ -550,7 +603,7 @@ if summary.empty:
     st.stop()
 
 # =========================
-# 扣减库存
+# 库存变动
 # =========================
 
 result = inv_original.copy()
@@ -561,29 +614,29 @@ work["__stock_before"] = pd.to_numeric(
     errors="coerce",
 ).fillna(0)
 
-# 用总扣减数量计算最终库存。
-summary_for_merge = summary[["__norm_style", "__norm_size", "本次扣减数量"]].copy()
+# 用总库存变动数量计算最终库存。普通出库是负数，原款式加回是正数。
+summary_for_merge = summary[["__norm_style", "__norm_size", "本次库存变动数量"]].copy()
 work = work.merge(summary_for_merge, on=["__norm_style", "__norm_size"], how="left")
-work["本次扣减数量"] = work["本次扣减数量"].fillna(0).astype(int)
-work["__stock_after_raw"] = work["__stock_before"] - work["本次扣减数量"]
+work["本次库存变动数量"] = work["本次库存变动数量"].fillna(0).astype(int)
+work["__stock_after_raw"] = work["__stock_before"] + work["本次库存变动数量"]
 negative_mask = work["__stock_after_raw"] < 0
 
-# 如勾选日期库存列，则按日期顺序逐日扣减并写入 05/xx 列。
+# 如勾选日期库存列，则按日期顺序逐日变动并写入 05/xx 列。
 work["__running_stock"] = work["__stock_before"].copy()
 if update_date_snapshot:
     daily_summary = (
         detail.groupby(["日期", "__norm_style", "__norm_size"], as_index=False)
-        .agg(当日扣减数量=("扣减数量", "sum"))
+        .agg(当日库存变动数量=("库存变动数量", "sum"))
     )
 
     for d in selected_dates:
-        one_day = daily_summary[daily_summary["日期"] == d][["__norm_style", "__norm_size", "当日扣减数量"]].copy()
+        one_day = daily_summary[daily_summary["日期"] == d][["__norm_style", "__norm_size", "当日库存变动数量"]].copy()
         tmp_qty = work[["__norm_style", "__norm_size"]].merge(
             one_day,
             on=["__norm_style", "__norm_size"],
             how="left",
-        )["当日扣减数量"].fillna(0).astype(int)
-        work["__running_stock"] = work["__running_stock"] - tmp_qty.values
+        )["当日库存变动数量"].fillna(0).astype(int)
+        work["__running_stock"] = work["__running_stock"] + tmp_qty.values
         if floor_zero:
             work["__running_stock"] = work["__running_stock"].clip(lower=0)
         result[date_col_name(d)] = work["__running_stock"].round(0).astype(int)
@@ -600,43 +653,57 @@ summary["__matched"] = summary.apply(lambda r: (r["__norm_style"], r["__norm_siz
 matched_summary = summary[summary["__matched"]].copy()
 unmatched_summary = summary[~summary["__matched"]].copy()
 
-show_summary = matched_summary[["款式名称", "尺码", "本次扣减数量"]].sort_values(["款式名称", "尺码"]).reset_index(drop=True)
-all_summary_clean = summary[["款式名称", "尺码", "本次扣减数量"]].sort_values(["款式名称", "尺码"]).reset_index(drop=True)
+# 明细也打上是否匹配，用于计算实际会影响库存的出库 / 加回数量。
+detail["__matched"] = detail.apply(lambda r: (r["__norm_style"], r["__norm_size"]) in available_keys, axis=1) if not detail.empty else False
+matched_detail = detail[detail["__matched"]].copy() if not detail.empty else pd.DataFrame(columns=detail.columns)
+
+show_summary = matched_summary[["款式名称", "尺码", "本次库存变动数量"]].sort_values(["款式名称", "尺码"]).reset_index(drop=True)
+all_summary_clean = summary[["款式名称", "尺码", "本次库存变动数量"]].sort_values(["款式名称", "尺码"]).reset_index(drop=True)
 
 # =========================
 # 页面展示：只展示用户需要的两部分
 # =========================
 
-st.subheader("1）本次扣减汇总")
-st.caption("一个 cell 里有多个款式时，程序会拆成多个款式分别扣减；同一行的尺码会应用到该行所有款式。下面数量是所选日期区间合并后的总扣减数量。")
+st.subheader("1）本次库存变动汇总")
+st.caption("一个 cell 里有多个款式时，程序会拆成多个款式分别记录；同一行的尺码会应用到该行所有款式。普通出库 / 换货发货显示为负数，达人换货原款式加回显示为正数。")
 
-m1, m2, m3 = st.columns(3)
+m1, m2, m3, m4 = st.columns(4)
+out_total = int(abs(matched_detail.loc[matched_detail["库存变动数量"] < 0, "库存变动数量"].sum())) if not matched_detail.empty else 0
+in_total = int(matched_detail.loc[matched_detail["库存变动数量"] > 0, "库存变动数量"].sum()) if not matched_detail.empty else 0
+net_total = int(matched_detail["库存变动数量"].sum()) if not matched_detail.empty else 0
 with m1:
-    st.metric("本次扣减总件数", int(show_summary["本次扣减数量"].sum()) if not show_summary.empty else 0)
+    st.metric("出库扣减件数", out_total)
 with m2:
-    st.metric("扣减款式 + 尺码数", len(show_summary))
+    st.metric("原款加回件数", in_total)
 with m3:
+    st.metric("净库存变动", net_total)
+with m4:
     st.metric("未匹配项", len(unmatched_summary))
 
 if not show_summary.empty:
     show_summary = show_summary.copy()
-    show_summary["本次扣减数量"] = show_summary["本次扣减数量"].astype(int)
+    show_summary["本次库存变动数量"] = show_summary["本次库存变动数量"].astype(int)
     st.table(show_summary)
 else:
-    st.info("没有成功匹配到库存表的扣减项。")
+    st.info("没有成功匹配到库存表的库存变动项。")
 
 if not unmatched_summary.empty:
-    st.error("以下款式 + 尺码没有在库存表中匹配到，所以没有扣减。请检查水单款式名 / 尺码是否和库存表一致。")
+    st.error("以下款式 + 尺码没有在库存表中匹配到，所以没有更新库存。请检查水单 / 换货表款式名和尺码是否和库存表一致。")
     st.dataframe(
-        unmatched_summary[["款式名称", "尺码", "本次扣减数量"]].sort_values(["款式名称", "尺码"]),
+        unmatched_summary[["款式名称", "尺码", "本次库存变动数量"]].sort_values(["款式名称", "尺码"]),
         use_container_width=True,
         hide_index=True,
     )
 
+with st.expander("查看库存变动明细（含换货发货 -1 / 原款加回 +1）", expanded=False):
+    detail_show_cols = ["日期", "来源表", "变动类型", "款式名称", "尺码", "库存变动数量"]
+    detail_show = detail[detail_show_cols].sort_values(["日期", "来源表", "变动类型", "款式名称", "尺码"]).reset_index(drop=True)
+    st.dataframe(detail_show, use_container_width=True, hide_index=True)
+
 if negative_mask.any():
-    negative_rows = work.loc[negative_mask, ["__match_style", "__match_size", "__stock_before", "本次扣减数量", "__stock_after_raw"]].copy()
-    negative_rows.columns = ["款式名称", "尺码", "扣减前库存", "本次扣减数量", "扣减后库存"]
-    st.warning("有库存扣减后小于 0，请重点核对。")
+    negative_rows = work.loc[negative_mask, ["__match_style", "__match_size", "__stock_before", "本次库存变动数量", "__stock_after_raw"]].copy()
+    negative_rows.columns = ["款式名称", "尺码", "变动前库存", "本次库存变动数量", "变动后库存"]
+    st.warning("有库存变动后小于 0，请重点核对。")
     st.dataframe(negative_rows, use_container_width=True, hide_index=True)
 
 with st.expander("上传文件日期检查"):
@@ -650,7 +717,7 @@ if warnings:
         for w in warnings:
             st.write("-", w)
 
-st.subheader("2）扣完库存后的最新全部库存")
+st.subheader("2）变动后的最新全部库存")
 st.caption("这里保留库存表原本的格式；只更新【当前库存】。如果勾选日期库存列，程序会按日期区间顺序逐日新增 / 更新 05/xx 库存列。")
 st.dataframe(result, use_container_width=True, hide_index=True)
 
@@ -658,15 +725,15 @@ st.subheader("下载结果")
 col1, col2 = st.columns(2)
 with col1:
     st.download_button(
-        "下载：扣完库存后的最新库存 CSV",
+        "下载：库存变动后的最新库存 CSV",
         data=to_csv_bytes(result),
-        file_name=f"NailVesta_库存扣减后_{file_date_label(selected_dates)}.csv",
+        file_name=f"NailVesta_库存变动后_{file_date_label(selected_dates)}.csv",
         mime="text/csv",
     )
 with col2:
     st.download_button(
-        "下载：本次扣减汇总 CSV",
+        "下载：本次库存变动汇总 CSV",
         data=to_csv_bytes(all_summary_clean),
-        file_name=f"NailVesta_本次扣减汇总_{file_date_label(selected_dates)}.csv",
+        file_name=f"NailVesta_本次库存变动汇总_{file_date_label(selected_dates)}.csv",
         mime="text/csv",
     )
