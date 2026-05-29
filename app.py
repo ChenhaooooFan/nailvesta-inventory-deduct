@@ -105,11 +105,21 @@ def find_col(df, candidates, contains_any=None):
 
 
 def first_existing_col(df, candidates):
+    """返回候选列中实际存在且有有效值（非空/非'-'）的第一列。
+    如果所有候选列都无有效值，退化为返回第一个存在的列（兜底）。
+    """
+    first_found = None
     for c in candidates:
         col = find_col(df, [c])
-        if col:
+        if not col:
+            continue
+        if first_found is None:
+            first_found = col
+        # 检查这列是否有至少一个非空、非'-'的值。
+        values = df[col].astype(str).str.strip().replace("-", "").replace("", pd.NA).dropna()
+        if not values.empty:
             return col
-    return None
+    return first_found
 
 
 def parse_date_series(series):
@@ -311,7 +321,7 @@ def split_style_names(raw_value):
     if not text:
         return []
 
-    # 如果是“款式 + 库位”字段，优先抓每段“｜ 库位”前面的款式名。
+    # 如果是"款式 + 库位"字段，优先抓每段"｜ 库位"前面的款式名。
     if "库位" in text and ("｜" in text or "|" in text):
         pieces = re.split(r"[,，\n;；]+", text)
         styles = []
@@ -332,7 +342,7 @@ def split_style_names(raw_value):
         piece = norm_text(piece)
         if not piece:
             continue
-        # 兜底：如果普通列里混进了“款式 ｜ 库位：xxx”，去掉库位部分。
+        # 兜底：如果普通列里混进了"款式 ｜ 库位：xxx"，去掉库位部分。
         piece = re.split(r"\s*[|｜]\s*库位", piece, maxsplit=1)[0]
         piece = norm_text(piece)
         if piece:
@@ -558,8 +568,6 @@ with st.sidebar:
     st.header("2）选择日期区间")
     st.caption("以后上传的是完整总表也没问题：这里只按你手动选择的日期区间扣减，区间首尾日期都包含。")
 
-    # 上传的是完整总表时，默认不能选“最早日期到最新日期”，否则容易误扣很多天。
-    # 所以默认只选 CSV 里能识别到的最新一天；你需要补扣周五-周一时，再手动拉开区间。
     if available_dates:
         max_available_date = max(available_dates)
         default_start = max_available_date
@@ -650,8 +658,8 @@ sources = [
     {
         "name": "深达水单表",
         "file": influencer_file,
-        "style_cols": ["Product Name", "Product Name1", "款式", "款式名称", "Style Names", "款式 + 库位"],
-        "size_cols": ["Size'", "Size", "尺码", "尺码 (size)"],
+        "style_cols": ["款式", "款式名称", "Product Name", "Product Name1", "Style Names", "款式 + 库位"],
+        "size_cols": ["Size", "Size'", "尺码", "尺码 (size)"],
         "id_cols": ["Order ID", "订单ID", "订单编号", "订单号", "查物流 Tracking No.", "打包 Tracking No.", "Tracking No.", "Handle", "达人Name", "email", "Phone"],
     },
     {
@@ -764,7 +772,7 @@ show_summary = matched_summary[["款式名称", "尺码", "本次扣减数量"]]
 all_summary_clean = summary[["款式名称", "尺码", "本次扣减数量"]].sort_values(["款式名称", "尺码"]).reset_index(drop=True)
 
 # =========================
-# 页面展示：只展示用户需要的两部分
+# 页面展示
 # =========================
 
 st.subheader("1）本次扣减汇总")
