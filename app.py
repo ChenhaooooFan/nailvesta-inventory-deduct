@@ -135,12 +135,15 @@ def format_date_distribution(parsed_dates):
     return "；".join([f"{d.strftime('%Y/%m/%d')}：{int(n)}条" for d, n in counts.items()])
 
 
-def get_date_distribution_row(df_raw, table_name):
+_DEFAULT_DATE_COLS = ["日期", "Date", "date"]
+
+
+def get_date_distribution_row(df_raw, table_name, date_cols=None):
     df = clean_dataframe(df_raw)
     if df is None or (df.empty and len(df.columns) == 0):
         return {"来源表": table_name, "总行数": 0, "日期列": "未找到", "可识别日期分布": "空表"}
 
-    date_col = find_col(df, ["日期", "Date", "date"])
+    date_col = find_col(df, date_cols or _DEFAULT_DATE_COLS)
     if not date_col:
         return {"来源表": table_name, "总行数": len(df), "日期列": "未找到", "可识别日期分布": "无法检查"}
 
@@ -153,14 +156,14 @@ def get_date_distribution_row(df_raw, table_name):
     }
 
 
-def get_available_dates_from_one_file(uploaded_file):
+def get_available_dates_from_one_file(uploaded_file, date_cols=None):
     if uploaded_file is None:
         return []
     df_raw = read_csv_safely(uploaded_file)
     df = clean_dataframe(df_raw)
     if df is None or (df.empty and len(df.columns) == 0):
         return []
-    date_col = find_col(df, ["日期", "Date", "date"])
+    date_col = find_col(df, date_cols or _DEFAULT_DATE_COLS)
     if not date_col:
         return []
     parsed = parse_date_series(df[date_col]).dropna()
@@ -321,7 +324,7 @@ def split_style_names(raw_value):
     if not text:
         return []
 
-    # 如果是"款式 + 库位"字段，优先抓每段"｜ 库位"前面的款式名。
+    # 如果是“款式 + 库位”字段，优先抓每段“｜ 库位”前面的款式名。
     if "库位" in text and ("｜" in text or "|" in text):
         pieces = re.split(r"[,，\n;；]+", text)
         styles = []
@@ -342,7 +345,7 @@ def split_style_names(raw_value):
         piece = norm_text(piece)
         if not piece:
             continue
-        # 兜底：如果普通列里混进了"款式 ｜ 库位：xxx"，去掉库位部分。
+        # 兜底：如果普通列里混进了“款式 ｜ 库位：xxx”，去掉库位部分。
         piece = re.split(r"\s*[|｜]\s*库位", piece, maxsplit=1)[0]
         piece = norm_text(piece)
         if piece:
@@ -420,7 +423,7 @@ def prepare_inventory(inv_raw):
 # 来源表提取
 # =========================
 
-def extract_rows_from_one_table(df_raw, table_name, selected_dates, style_cols_priority, size_cols_priority, id_cols_priority, done_only):
+def extract_rows_from_one_table(df_raw, table_name, selected_dates, style_cols_priority, size_cols_priority, id_cols_priority, done_only, date_cols=None):
     df = clean_dataframe(df_raw)
     if df is None or (df.empty and len(df.columns) == 0):
         return pd.DataFrame(), [f"{table_name}：空表，已跳过。"]
@@ -428,7 +431,7 @@ def extract_rows_from_one_table(df_raw, table_name, selected_dates, style_cols_p
     if df.empty:
         return pd.DataFrame(), [f"{table_name}：CSV 只有表头，0 条记录，已跳过。"]
 
-    date_col = find_col(df, ["日期", "Date", "date"])
+    date_col = find_col(df, date_cols or _DEFAULT_DATE_COLS)
     if not date_col:
         return pd.DataFrame(), [f"{table_name}：没有找到日期列，已跳过。当前列名：{', '.join(df.columns)}"]
 
@@ -510,7 +513,8 @@ def build_deduction_summary(uploaded_sources, selected_dates, done_only):
             continue
 
         df_raw = read_csv_safely(uploaded)
-        date_check_rows.append(get_date_distribution_row(df_raw, table_name))
+        date_cols = source.get("date_cols")
+        date_check_rows.append(get_date_distribution_row(df_raw, table_name, date_cols=date_cols))
         rows, warnings = extract_rows_from_one_table(
             df_raw=df_raw,
             table_name=table_name,
@@ -519,6 +523,7 @@ def build_deduction_summary(uploaded_sources, selected_dates, done_only):
             size_cols_priority=source["size_cols"],
             id_cols_priority=source.get("id_cols", []),
             done_only=done_only,
+            date_cols=date_cols,
         )
         if not rows.empty:
             all_rows.append(rows)
@@ -559,7 +564,7 @@ with st.sidebar:
     exchange_file = st.file_uploader("达人换货表 CSV", type=["csv"])
 
     available_dates = sorted(set(
-        get_available_dates_from_one_file(b4g1_file)
+        get_available_dates_from_one_file(b4g1_file, date_cols=["履约时间", "日期", "Date", "date"])
         + get_available_dates_from_one_file(normal_file)
         + get_available_dates_from_one_file(influencer_file)
         + get_available_dates_from_one_file(exchange_file)
@@ -568,6 +573,8 @@ with st.sidebar:
     st.header("2）选择日期区间")
     st.caption("以后上传的是完整总表也没问题：这里只按你手动选择的日期区间扣减，区间首尾日期都包含。")
 
+    # 上传的是完整总表时，默认不能选“最早日期到最新日期”，否则容易误扣很多天。
+    # 所以默认只选 CSV 里能识别到的最新一天；你需要补扣周五-周一时，再手动拉开区间。
     if available_dates:
         max_available_date = max(available_dates)
         default_start = max_available_date
@@ -644,6 +651,7 @@ sources = [
     {
         "name": "赠送款式/B4表",
         "file": b4g1_file,
+        "date_cols": ["履约时间", "日期", "Date", "date"],
         "style_cols": ["赠送款式 Style Names", "Product Name", "款式", "款式名称", "Style Names", "款式 + 库位"],
         "size_cols": ["尺码 (size)", "Size'", "Size", "尺码"],
         "id_cols": ["Order ID", "订单ID", "订单编号", "订单号", "Tracking ID (Last 4 digital)", "Tracking ID", "顾客Handle （customer name in tiktokshop)", "顾客Handle", "customer name"],
@@ -772,7 +780,7 @@ show_summary = matched_summary[["款式名称", "尺码", "本次扣减数量"]]
 all_summary_clean = summary[["款式名称", "尺码", "本次扣减数量"]].sort_values(["款式名称", "尺码"]).reset_index(drop=True)
 
 # =========================
-# 页面展示
+# 页面展示：只展示用户需要的两部分
 # =========================
 
 st.subheader("1）本次扣减汇总")
