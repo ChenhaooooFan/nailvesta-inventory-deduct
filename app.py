@@ -37,7 +37,7 @@ def read_csv_safely(uploaded_file):
 
 
 def clean_col(col):
-    return str(col).replace("\ufeff", "").strip()
+    return str(col).replace("﻿", "").strip()
 
 
 def clean_dataframe(df):
@@ -49,7 +49,7 @@ def clean_dataframe(df):
 
 
 def norm_text(value):
-    text = str(value).replace("\ufeff", "").replace("\u200b", "").replace("\xa0", " ").strip()
+    text = str(value).replace("﻿", "").replace("​", "").replace("\xa0", " ").strip()
     text = re.sub(r"\s+", " ", text)
     return text
 
@@ -60,7 +60,6 @@ def norm_style(value):
 
 def norm_size(value):
     text = norm_text(value).upper()
-    # 只抓明确的尺码，避免误识别普通单词里的 S/M/L。
     m = re.search(r"\b(XS|XL|S|M|L)\b", text)
     return m.group(1) if m else text
 
@@ -105,9 +104,6 @@ def find_col(df, candidates, contains_any=None):
 
 
 def first_existing_col(df, candidates):
-    """返回候选列中实际存在且有有效值（非空/非'-'）的第一列。
-    如果所有候选列都无有效值，退化为返回第一个存在的列（兜底）。
-    """
     first_found = None
     for c in candidates:
         col = find_col(df, [c])
@@ -115,7 +111,6 @@ def first_existing_col(df, candidates):
             continue
         if first_found is None:
             first_found = col
-        # 检查这列是否有至少一个非空、非'-'的值。
         values = df[col].astype(str).str.strip().replace("-", "").replace("", pd.NA).dropna()
         if not values.empty:
             return col
@@ -123,7 +118,6 @@ def first_existing_col(df, candidates):
 
 
 def parse_date_series(series):
-    # 兼容 Lark/Excel 导出的 2026/05/06、2026-05-06、带时间戳等格式。
     return pd.to_datetime(series.astype(str).str.strip(), errors="coerce").dt.date
 
 
@@ -171,7 +165,6 @@ def get_available_dates_from_one_file(uploaded_file, date_cols=None):
 
 
 def date_col_name(selected_date):
-    # 和你库存表里的 05/05 格式保持一致。
     return selected_date.strftime("%m/%d")
 
 
@@ -199,7 +192,6 @@ def stable_hash(text):
 
 
 def find_existing_cols(df, candidates):
-    """返回候选列中实际存在的列，尽量保留候选顺序。"""
     if df is None:
         return []
     found = []
@@ -211,11 +203,6 @@ def find_existing_cols(df, candidates):
 
 
 def build_source_record_base(row, table_name, row_index, date_col, style_col, size_col, id_cols):
-    """
-    生成来源行的稳定身份。
-    优先使用 Order ID / Tracking / Handle 等业务字段；如果这些字段都空，
-    再用日期 + 款式 + 尺码 + 行号兜底。
-    """
     parts = [f"source={table_name}"]
 
     date_value = norm_text(row.get(date_col, "")) if date_col else ""
@@ -229,9 +216,6 @@ def build_source_record_base(row, table_name, row_index, date_col, style_col, si
             parts.append(f"{col}={value}")
             has_business_id = True
 
-    # 有业务 ID 时，行身份尽量不包含款式 cell。这样同一行之后新增款式时，
-    # 旧款式的扣减 ID 不会因为 cell 内容变化而重新生成，避免重复扣。
-    # 没有业务 ID 时，才用款式 + 尺码 + 行号兜底。
     if not has_business_id:
         style_value = norm_text(row.get(style_col, "")) if style_col else ""
         size_value = norm_text(row.get(size_col, "")) if size_col else ""
@@ -245,7 +229,6 @@ def build_source_record_base(row, table_name, row_index, date_col, style_col, si
 
 
 def make_deduction_item_id(table_name, source_record_base, style, size):
-    # 同一行如果有多个款式，每个款式 + 尺码生成一个扣减 ID；之后新增款式不会被旧记录挡掉。
     raw = f"{table_name}|{source_record_base}|style={norm_style(style)}|size={norm_size(size)}"
     return stable_hash(raw)
 
@@ -312,19 +295,10 @@ def build_updated_deduction_log(previous_log, new_detail, selected_dates):
 # =========================
 
 def split_style_names(raw_value):
-    """
-    支持一格多个款式，例如：
-    - Teal Blossom, Tidal Flower
-    - Starlit Rift, Ruby Bloom
-    - Cherry Romance ｜ 库位：B-04-11,Aqua Blush ｜ 库位：A-02-07
-
-    一个 cell 里有几个款式，就每个款式各扣 1 件，尺码使用该行的尺码。
-    """
     text = norm_text(raw_value)
     if not text:
         return []
 
-    # 如果是“款式 + 库位”字段，优先抓每段“｜ 库位”前面的款式名。
     if "库位" in text and ("｜" in text or "|" in text):
         pieces = re.split(r"[,，\n;；]+", text)
         styles = []
@@ -338,14 +312,12 @@ def split_style_names(raw_value):
                 styles.append(piece)
         return styles
 
-    # 普通 Lark 多选字段 CSV 导出一般是英文逗号分隔。
     pieces = re.split(r"[,，\n;；]+", text)
     cleaned = []
     for piece in pieces:
         piece = norm_text(piece)
         if not piece:
             continue
-        # 兜底：如果普通列里混进了“款式 ｜ 库位：xxx”，去掉库位部分。
         piece = re.split(r"\s*[|｜]\s*库位", piece, maxsplit=1)[0]
         piece = norm_text(piece)
         if piece:
@@ -401,7 +373,6 @@ def prepare_inventory(inv_raw):
     )
 
     if style_col:
-        # 产品名称在 S/M/L 三行里通常只有第一行有值，自动向下填充仅用于匹配。
         inv["__match_style"] = inv[style_col].replace("", pd.NA).ffill().fillna("").map(norm_text)
     else:
         inv["__match_style"] = ""
@@ -562,19 +533,19 @@ with st.sidebar:
     normal_file = st.file_uploader("水单表 - 新普通水单 CSV", type=["csv"])
     influencer_file = st.file_uploader("深达水单表 CSV", type=["csv"])
     exchange_file = st.file_uploader("达人换货表 CSV", type=["csv"])
+    delayed_file = st.file_uploader("延迟订单履约记录表 CSV", type=["csv"])
 
     available_dates = sorted(set(
         get_available_dates_from_one_file(b4g1_file, date_cols=["履约时间", "日期", "Date", "date"])
         + get_available_dates_from_one_file(normal_file)
         + get_available_dates_from_one_file(influencer_file)
         + get_available_dates_from_one_file(exchange_file)
+        + get_available_dates_from_one_file(delayed_file, date_cols=["履约日期", "日期", "Date", "date"])
     ))
 
     st.header("2）选择日期区间")
     st.caption("以后上传的是完整总表也没问题：这里只按你手动选择的日期区间扣减，区间首尾日期都包含。")
 
-    # 上传的是完整总表时，默认不能选“最早日期到最新日期”，否则容易误扣很多天。
-    # 所以默认只选 CSV 里能识别到的最新一天；你需要补扣周五-周一时，再手动拉开区间。
     if available_dates:
         max_available_date = max(available_dates)
         default_start = max_available_date
@@ -638,7 +609,6 @@ if not stock_col:
     st.write("当前库存表列名：", list(inv_original.columns))
     st.stop()
 
-# 重复 key 会导致扣错，必须阻止。
 valid_key = inv_match["__norm_style"].ne("") & inv_match["__norm_size"].ne("")
 dup_mask = inv_match.duplicated(["__norm_style", "__norm_size"], keep=False) & valid_key
 if dup_mask.any():
@@ -676,6 +646,14 @@ sources = [
         "style_cols": ["发货款式", "Product Name", "款式", "款式名称"],
         "size_cols": ["发货尺码", "Size'", "Size", "尺码", "尺码 (size)"],
         "id_cols": ["Order ID", "订单ID", "订单编号", "订单号", "Tracking ID (Last 4 digital)", "Tracking ID", "达人Handle", "Handle", "原款 SKU", "原款式名称", "原款式尺码"],
+    },
+    {
+        "name": "延迟订单履约记录表",
+        "file": delayed_file,
+        "date_cols": ["履约日期", "日期", "Date", "date"],
+        "style_cols": ["款式名称", "Product Name", "款式", "Style Names"],
+        "size_cols": ["尺码", "Size", "Size'", "尺码 (size)"],
+        "id_cols": ["Order ID", "Tracking No.", "订单ID", "订单编号", "订单号"],
     },
 ]
 
@@ -737,14 +715,12 @@ work["__stock_before"] = pd.to_numeric(
     errors="coerce",
 ).fillna(0)
 
-# 用总扣减数量计算最终库存。
 summary_for_merge = summary[["__norm_style", "__norm_size", "本次扣减数量"]].copy()
 work = work.merge(summary_for_merge, on=["__norm_style", "__norm_size"], how="left")
 work["本次扣减数量"] = work["本次扣减数量"].fillna(0).astype(int)
 work["__stock_after_raw"] = work["__stock_before"] - work["本次扣减数量"]
 negative_mask = work["__stock_after_raw"] < 0
 
-# 如勾选日期库存列，则按日期顺序逐日扣减并写入 05/xx 列。
 work["__running_stock"] = work["__stock_before"].copy()
 if update_date_snapshot:
     daily_summary = (
@@ -768,7 +744,6 @@ else:
     if floor_zero:
         work["__running_stock"] = work["__running_stock"].clip(lower=0)
 
-# 只把最终库存写回原始表，不添加任何诊断列。
 result[stock_col] = work["__running_stock"].round(0).astype(int)
 
 available_keys = set(zip(work["__norm_style"], work["__norm_size"]))
@@ -780,7 +755,7 @@ show_summary = matched_summary[["款式名称", "尺码", "本次扣减数量"]]
 all_summary_clean = summary[["款式名称", "尺码", "本次扣减数量"]].sort_values(["款式名称", "尺码"]).reset_index(drop=True)
 
 # =========================
-# 页面展示：只展示用户需要的两部分
+# 页面展示
 # =========================
 
 st.subheader("1）本次扣减汇总")
